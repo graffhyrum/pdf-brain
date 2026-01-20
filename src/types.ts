@@ -131,9 +131,8 @@ export class LibraryConfig extends Schema.Class<LibraryConfig>("LibraryConfig")(
   });
 
   static fromEnv(): LibraryConfig {
-    const libraryPath =
-      process.env.PDF_LIBRARY_PATH ||
-      `${process.env.HOME}/Documents/.pdf-library`;
+    const libraryPath = resolveLibraryPath();
+
     return new LibraryConfig({
       libraryPath,
       dbPath: `${libraryPath}/library.db`,
@@ -195,13 +194,26 @@ export class Config extends Schema.Class<Config>("Config")({
 // ============================================================================
 
 /**
+ * Resolve library path from environment or default.
+ * Validates env path exists to prevent silent failures.
+ */
+function resolveLibraryPath(): string {
+  const envPath = process.env.PDF_LIBRARY_PATH;
+  const defaultPath = `${process.env.HOME}/Documents/.pdf-library`;
+  
+  if (envPath && !existsSync(envPath)) {
+    console.warn(`PDF_LIBRARY_PATH "${envPath}" does not exist, using default: ${defaultPath}`);
+  }
+  
+  return envPath && existsSync(envPath) ? envPath : defaultPath;
+}
+
+/**
  * Load config from $PDF_LIBRARY_PATH/config.json.
  * Creates config.json with defaults if it doesn't exist.
  */
 export function loadConfig(): Config {
-  const libraryPath =
-    process.env.PDF_LIBRARY_PATH ||
-    `${process.env.HOME}/Documents/.pdf-library`;
+  const libraryPath = resolveLibraryPath();
   const configPath = `${libraryPath}/config.json`;
 
   // Create config file with defaults if missing
@@ -227,9 +239,7 @@ export function loadConfig(): Config {
  * API keys are never stored - they come from env vars (AI_GATEWAY_API_KEY).
  */
 export function saveConfig(config: Config): void {
-  const libraryPath =
-    process.env.PDF_LIBRARY_PATH ||
-    `${process.env.HOME}/Documents/.pdf-library`;
+  const libraryPath = resolveLibraryPath();
   const configPath = `${libraryPath}/config.json`;
 
   // Ensure directory exists

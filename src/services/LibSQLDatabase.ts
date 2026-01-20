@@ -29,14 +29,18 @@ export class LibSQLDatabase {
    *   - authToken: Optional auth token for Turso/remote databases
    *   - embeddingDimension: Vector dimension for embeddings (default: 1024 for mxbai-embed-large)
    *     Use 768 for nomic-embed-text, 384 for all-minilm, etc.
+   *   - keepAlive: If true, do NOT delete database file when layer is disposed (use for production)
+   *     If false (default), delete database file on disposal (use for tests)
    */
   static make(config: {
     url: string;
     authToken?: string;
     embeddingDimension?: number;
+    keepAlive?: boolean;
   }) {
     const embeddingDim = config.embeddingDimension ?? DEFAULT_EMBEDDING_DIM;
-
+    const keepAlive = config.keepAlive ?? false;
+    
     return Layer.scoped(
       Database,
       Effect.gen(function* () {
@@ -55,10 +59,56 @@ export class LibSQLDatabase {
             new DatabaseError({ reason: `Schema init failed: ${e}` }),
         });
 
-        // Cleanup on scope close
         yield* Effect.addFinalizer(() =>
-          Effect.sync(() => {
-            client.close();
+          Effect.gen(function* () {
+            yield* Effect.sync(() => {
+              client.close();
+            });
+
+            // Only delete database files if keepAlive is false (default)
+            // This prevents accidental deletion of production databases
+            // Tests should use keepAlive: false (default) for cleanup
+            // Production should use keepAlive: true to preserve database
+            if (!keepAlive && config.url.startsWith('file:')) {
+              const dbPath = config.url.replace('file:', '');
+              if (dbPath && !dbPath.includes(':memory:')) {
+                const dbFile = Bun.file(dbPath);
+                const shmFile = Bun.file(`${dbPath}-shm`);
+                const walFile = Bun.file(`${dbPath}-wal`);
+                
+                // Use Effect.tryPromise to properly await async deletions
+                yield* Effect.tryPromise({
+                  try: () => dbFile.delete(),
+                  catch: (e: any) => {
+                    // Ignore file-not-found errors (file already deleted or doesn't exist)
+                    if (e?.code === 'ENOENT' || e?.name === 'NotFoundError') {
+                      return undefined;
+                    }
+                    return e;
+                  },
+                }).pipe(Effect.ignore);
+                
+                yield* Effect.tryPromise({
+                  try: () => shmFile.delete(),
+                  catch: (e: any) => {
+                    if (e?.code === 'ENOENT' || e?.name === 'NotFoundError') {
+                      return undefined;
+                    }
+                    return e;
+                  },
+                }).pipe(Effect.ignore);
+                
+                yield* Effect.tryPromise({
+                  try: () => walFile.delete(),
+                  catch: (e: any) => {
+                    if (e?.code === 'ENOENT' || e?.name === 'NotFoundError') {
+                      return undefined;
+                    }
+                    return e;
+                  },
+                }).pipe(Effect.ignore);
+              }
+            }
           }),
         );
 
