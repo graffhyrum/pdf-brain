@@ -547,7 +547,6 @@ export function parseArgs(args: string[]) {
   return result;
 }
 
-
 /**
  * Run MCP server for AI assistant integration
  * Refactored to keep Effect layer scope alive for process lifetime
@@ -575,7 +574,7 @@ function runMCPServer(): void {
           path: { type: "string", description: "File path or URL" },
           title: { type: "string", description: "Optional custom title" },
           tags: { type: "array", items: { type: "string" }, description: "Optional tags" },
-          enrich: { type: "boolean", description: "Enable LLM enrichment", default: false },
+          enrich: { type: "boolean", description: "Enable LLM enrichment. Sends up to 8000 characters of the file's text to the configured LLM provider (Ollama or Anthropic) to suggest a title and tags.", default: false },
         },
         required: ["path"],
       },
@@ -1892,7 +1891,7 @@ const program = Effect.gen(function* () {
                   }
                 } else if (ext === ".md" || ext === ".markdown") {
                   const readResult = yield* Effect.either(
-                    Effect.promise(() => Bun.file(filePath).text())
+                    Effect.tryPromise(() => Bun.file(filePath).text())
                   );
                   if (readResult._tag === "Right") {
                     content = readResult.right;
@@ -2057,7 +2056,7 @@ const program = Effect.gen(function* () {
               } else {
                 // For markdown, read directly
                 const readResult = yield* Effect.either(
-                  Effect.promise(() => Bun.file(filePath).text())
+                  Effect.tryPromise(() => Bun.file(filePath).text())
                 );
                 if (readResult._tag === "Right") {
                   content = readResult.right;

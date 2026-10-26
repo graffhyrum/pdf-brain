@@ -24,6 +24,7 @@ beforeEach(() => {
   added = [];
   enrichCalls = [];
   enrichFails = false;
+  pdfPages = "fail";
 });
 
 const library = {
@@ -49,12 +50,21 @@ const tagger = {
   },
 } as unknown as AutoTagger;
 
+let pdfPages: { text: string }[] | "fail" = "fail";
+
+const pdfExtractor = {
+  extract: () =>
+    pdfPages === "fail"
+      ? Effect.fail(new Error("not a PDF"))
+      : Effect.succeed({ pageCount: pdfPages.length, pages: pdfPages }),
+} as never;
+
 const callAdd = (args: Record<string, unknown>) =>
   Effect.runPromise(
     createMCPToolHandlers()["pdf-brain_add"](args).pipe(
       Effect.provideService(PDFLibrary, library),
       Effect.provideService(AutoTagger, tagger),
-      Effect.provideService(PDFExtractor, {} as never),
+      Effect.provideService(PDFExtractor, pdfExtractor),
       Effect.provideService(Ollama, {} as never),
       Effect.provideService(TaxonomyService, {} as never)
     )
@@ -128,5 +138,38 @@ describe("MCP pdf-brain_add", () => {
 
     await callAdd({ path: notePath });
     expect(added[1].options.tags).toBeUndefined();
+  });
+
+  test("enrich: true on a PDF sends only the first 10 pages", async () => {
+    pdfPages = Array.from({ length: 12 }, (_, i) => ({ text: `page ${i}` }));
+    const pdfPath = join(dir, "paper.pdf");
+
+    await callAdd({ path: pdfPath, enrich: true });
+
+    const firstTen = pdfPages.slice(0, 10).map((p) => p.text).join("\n\n");
+    expect(enrichCalls).toEqual([{ path: pdfPath, content: firstTen }]);
+    expect(added[0].options.title).toBe("LLM Title");
+  });
+
+  test("enrich: true on a PDF caps the text sent at 8000 characters", async () => {
+    pdfPages = Array.from({ length: 3 }, () => ({ text: "x".repeat(5000) }));
+
+    await callAdd({ path: join(dir, "long.pdf"), enrich: true });
+
+    expect(enrichCalls[0].content).toHaveLength(8000);
+  });
+
+  test("enrich: true on a PDF whose text extraction fails skips enrichment and still adds", async () => {
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      await callAdd({ path: join(dir, "broken.pdf"), title: "My Title", enrich: true });
+
+      expect(enrichCalls).toHaveLength(0);
+      expect(added).toHaveLength(1);
+      expect(added[0].options.title).toBe("My Title");
+    } finally {
+      console.error = originalError;
+    }
   });
 });

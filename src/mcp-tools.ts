@@ -120,6 +120,7 @@ export const createMCPToolHandlers = () => {
           args.path,
           new AddOptions({
             title: metadata.title,
+            // Fall back to args.tags, not undefined, so a caller's [] still reaches AddOptions as [].
             tags: metadata.tags.length > 0 ? metadata.tags : args.tags,
           })
         );
