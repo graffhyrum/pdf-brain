@@ -19,11 +19,15 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 let added: { path: string; options: AddOptions }[] = [];
 let enrichCalls: { path: string; content: string }[] = [];
 let enrichFails = false;
+let enrichDies = false;
+let llmTags = ["llm-tag"];
 
 beforeEach(() => {
   added = [];
   enrichCalls = [];
   enrichFails = false;
+  enrichDies = false;
+  llmTags = ["llm-tag"];
   pdfPages = "fail";
 });
 
@@ -42,10 +46,11 @@ const tagger = {
   enrich: (path: string, content: string) => {
     enrichCalls.push({ path, content });
     if (enrichFails) return Effect.fail(new Error("LLM unavailable"));
+    if (enrichDies) return Effect.die(new Error("provider client crashed"));
     return Effect.succeed({
       title: "LLM Title",
       summary: "A summary",
-      tags: ["llm-tag"],
+      tags: llmTags,
     } as unknown as EnrichmentResult);
   },
 } as unknown as AutoTagger;
@@ -171,5 +176,39 @@ describe("MCP pdf-brain_add", () => {
     } finally {
       console.error = originalError;
     }
+  });
+  test("enrich: true does not store a tag twice when the LLM repeats a caller tag", async () => {
+    llmTags = ["mine", "llm-tag"];
+
+    await callAdd({ path: notePath, tags: ["mine"], enrich: true });
+
+    expect(added[0].options.tags).toEqual(["mine", "llm-tag"]);
+  });
+
+  test("enrich: true still adds with the caller's metadata when enrichment dies with a defect", async () => {
+    enrichDies = true;
+    const originalError = console.error;
+    const errors: unknown[][] = [];
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const result = await callAdd({ path: notePath, title: "My Title", tags: ["mine"], enrich: true });
+
+      expect(added).toHaveLength(1);
+      expect(added[0].options.title).toBe("My Title");
+      expect(added[0].options.tags).toEqual(["mine"]);
+      expect(result.success).toBe(true);
+      expect(errors.flat().join(" ")).toContain("provider client crashed");
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  test("enrich: true on Markdown caps the text sent at 8000 characters, like PDFs", async () => {
+    const longPath = join(dir, "long.md");
+    writeFileSync(longPath, "y".repeat(20000));
+
+    await callAdd({ path: longPath, enrich: true });
+
+    expect(enrichCalls[0].content).toHaveLength(8000);
   });
 });

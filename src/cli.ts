@@ -574,7 +574,14 @@ function runMCPServer(): void {
           path: { type: "string", description: "File path or URL" },
           title: { type: "string", description: "Optional custom title" },
           tags: { type: "array", items: { type: "string" }, description: "Optional tags" },
-          enrich: { type: "boolean", description: "Enable LLM enrichment. Sends up to 8000 characters of the file's text to the configured LLM provider (Ollama or Anthropic) to suggest a title and tags.", default: false },
+          enrich: {
+            type: "boolean",
+            description:
+              "Enable LLM enrichment to suggest a title and tags. " +
+              "Sends text from the start of the file (first 10 pages of a PDF, at most 8000 characters; " +
+              "the prompt itself uses the first 6000) to the configured LLM provider (Ollama or Anthropic).",
+            default: false,
+          },
         },
         required: ["path"],
       },

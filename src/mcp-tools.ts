@@ -2,7 +2,7 @@
  * MCP tool handlers and the enrichment step they share with the CLI `add`.
  * Kept out of cli.ts so tests can import them without running the CLI entry.
  */
-import { Effect } from "effect";
+import { Cause, Effect } from "effect";
 import { extname } from "path";
 import { AddOptions, PDFLibrary, SearchOptions } from "./index.js";
 import { AutoTagger, type EnrichmentResult } from "./services/AutoTagger.js";
@@ -47,13 +47,16 @@ export const enrichAddMetadata = (
     });
     const enriched: EnrichedAddMetadata = {
       title: input.title || result.title,
-      tags: [...input.tags, ...result.tags],
+      tags: [...new Set([...input.tags, ...result.tags])],
       result,
     };
     return enriched;
   });
 
-/** Text to enrich from: the first 10 pages of a PDF (max 8000 chars) or a whole Markdown file. */
+/** Most characters of file text handed to enrichment, for PDFs and Markdown alike. */
+const ENRICH_CONTENT_MAX_CHARS = 8000;
+
+/** Text to enrich from: the first 10 pages of a PDF or the start of a Markdown file, capped at ENRICH_CONTENT_MAX_CHARS. */
 const readEnrichmentContent = (localPath: string) =>
   Effect.gen(function* () {
     const ext = extname(localPath).toLowerCase();
@@ -69,7 +72,7 @@ const readEnrichmentContent = (localPath: string) =>
         return undefined;
       }
       const pages = extractResult.right.pages.slice(0, 10);
-      return pages.map((p) => p.text).join("\n\n").slice(0, 8000);
+      return pages.map((p) => p.text).join("\n\n").slice(0, ENRICH_CONTENT_MAX_CHARS);
     }
     if (ext === ".md" || ext === ".markdown") {
       // tryPromise, not promise: a missing file must be a recoverable failure, not a defect.
@@ -82,7 +85,7 @@ const readEnrichmentContent = (localPath: string) =>
         );
         return undefined;
       }
-      return readResult.right;
+      return readResult.right.slice(0, ENRICH_CONTENT_MAX_CHARS);
     }
     return undefined;
   });
@@ -105,11 +108,13 @@ export const createMCPToolHandlers = () => {
         const metadata =
           args.enrich === true
             ? yield* enrichAddMetadata(args.path, callerMetadata).pipe(
-                Effect.catchAll((error) =>
+                // catchAllCause, not catchAll: AutoTagger.enrich uses Effect.promise
+                // internally, so a rejection there is a defect that catchAll would miss.
+                Effect.catchAllCause((cause) =>
                   Effect.sync(() => {
                     // Best effort: a failed LLM call must not stop the add.
                     console.error(
-                      `[pdf-brain_add] Enrichment failed, adding with caller metadata: ${error instanceof Error ? error.message : String(error)}`
+                      `[pdf-brain_add] Enrichment failed, adding with caller metadata: ${Cause.pretty(cause)}`
                     );
                     return callerMetadata;
                   })
@@ -120,7 +125,8 @@ export const createMCPToolHandlers = () => {
           args.path,
           new AddOptions({
             title: metadata.title,
-            // Fall back to args.tags, not undefined, so a caller's [] still reaches AddOptions as [].
+            // No tags at all: pass args.tags through as-is, so a caller who sent no
+            // tags leaves AddOptions.tags undefined (and one who sent [] keeps []).
             tags: metadata.tags.length > 0 ? metadata.tags : args.tags,
           })
         );
