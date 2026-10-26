@@ -3,7 +3,7 @@ import { Effect } from "effect";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { createMCPToolHandlers } from "./cli.js";
+import { createMCPToolHandlers } from "./mcp-tools.js";
 import { AddOptions, PDFLibrary } from "./index.js";
 import { AutoTagger, type EnrichmentResult } from "./services/AutoTagger.js";
 import { Ollama } from "./services/Ollama.js";
@@ -18,6 +18,7 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 let added: { path: string; options: AddOptions }[] = [];
 let enrichCalls: { path: string; content: string }[] = [];
+let enrichFails = false;
 
 beforeEach(() => {
   added = [];
@@ -35,8 +36,6 @@ const library = {
     });
   },
 } as unknown as PDFLibrary;
-
-let enrichFails = false;
 
 const tagger = {
   enrich: (path: string, content: string) => {
@@ -105,5 +104,29 @@ describe("MCP pdf-brain_add", () => {
     } finally {
       console.error = originalError;
     }
+  });
+
+  test("enrich: true on a missing Markdown file skips enrichment and still adds", async () => {
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      const missing = join(dir, "missing.md");
+      await callAdd({ path: missing, title: "My Title", enrich: true });
+
+      expect(enrichCalls).toHaveLength(0);
+      expect(added).toHaveLength(1);
+      expect(added[0].path).toBe(missing);
+      expect(added[0].options.title).toBe("My Title");
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  test("without enrich, passes the caller's tags through unchanged, including []", async () => {
+    await callAdd({ path: notePath, tags: [] });
+    expect(added[0].options.tags).toEqual([]);
+
+    await callAdd({ path: notePath });
+    expect(added[1].options.tags).toBeUndefined();
   });
 });

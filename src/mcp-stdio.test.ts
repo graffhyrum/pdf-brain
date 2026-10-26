@@ -14,7 +14,7 @@ test("routeConsoleToStderr keeps console output off stdout, the MCP protocol str
     await Effect.runPromise(Console.log("effect line"));
     process.stdout.write("protocol\\n");
   `;
-  const proc = Bun.spawn(["bun", "-e", script], { stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
