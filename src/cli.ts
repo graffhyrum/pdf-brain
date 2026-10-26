@@ -49,6 +49,7 @@ import {
   type Concept,
 } from "./services/TaxonomyService.js";
 import { Ollama, OllamaLive } from "./services/Ollama.js";
+import { routeConsoleToStderr } from "./mcp-stdio.js";
 
 /**
  * Check if a string is a URL
@@ -552,7 +553,8 @@ interface EnrichedAddMetadata {
 /**
  * Run LLM enrichment on a local PDF or Markdown file before it is added.
  * A title the caller passed wins over the LLM's; LLM tags are appended.
- * Writes nothing to stdout, so the MCP server can call it too.
+ * The enrichment pipeline logs progress with console.log; the MCP server
+ * routes that to stderr (see routeConsoleToStderr) before calling this.
  */
 export const enrichAddMetadata = (
   localPath: string,
@@ -592,7 +594,12 @@ const readEnrichmentContent = (localPath: string) =>
       const extractResult = yield* Effect.either(
         pdfExtractor.extract(localPath)
       );
-      if (extractResult._tag === "Left") return undefined;
+      if (extractResult._tag === "Left") {
+        console.error(
+          `[enrich] Skipping enrichment, PDF text extraction failed: ${extractResult.left}`
+        );
+        return undefined;
+      }
       const pages = extractResult.right.pages.slice(0, 10);
       return pages.map((p) => p.text).join("\n\n").slice(0, 8000);
     }
@@ -622,7 +629,17 @@ export const createMCPToolHandlers = () => {
         const callerMetadata = { title: args.title, tags: args.tags ?? [] };
         const metadata =
           args.enrich === true
-            ? yield* enrichAddMetadata(args.path, callerMetadata)
+            ? yield* enrichAddMetadata(args.path, callerMetadata).pipe(
+                Effect.catchAll((error) =>
+                  Effect.sync(() => {
+                    // Best effort: a failed LLM call must not stop the add.
+                    console.error(
+                      `[pdf-brain_add] Enrichment failed, adding with caller metadata: ${error instanceof Error ? error.message : String(error)}`
+                    );
+                    return callerMetadata;
+                  })
+                )
+              )
             : callerMetadata;
         const doc = yield* library.add(
           args.path,
@@ -751,6 +768,7 @@ export const createMCPToolHandlers = () => {
  * Refactored to keep Effect layer scope alive for process lifetime
  */
 function runMCPServer(): void {
+  routeConsoleToStderr();
   const config = LibraryConfig.fromEnv();
   const TaxonomyServiceLive = TaxonomyServiceImpl.make({
     url: `file:${config.dbPath}`,

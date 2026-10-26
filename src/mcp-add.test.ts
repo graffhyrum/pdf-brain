@@ -22,6 +22,7 @@ let enrichCalls: { path: string; content: string }[] = [];
 beforeEach(() => {
   added = [];
   enrichCalls = [];
+  enrichFails = false;
 });
 
 const library = {
@@ -35,9 +36,12 @@ const library = {
   },
 } as unknown as PDFLibrary;
 
+let enrichFails = false;
+
 const tagger = {
   enrich: (path: string, content: string) => {
     enrichCalls.push({ path, content });
+    if (enrichFails) return Effect.fail(new Error("LLM unavailable"));
     return Effect.succeed({
       title: "LLM Title",
       summary: "A summary",
@@ -82,5 +86,24 @@ describe("MCP pdf-brain_add", () => {
     expect(enrichCalls).toHaveLength(0);
     expect(added[0].options.title).toBe("My Title");
     expect(added[0].options.tags).toEqual(["mine"]);
+  });
+
+  test("enrich: true still adds with the caller's metadata when enrichment fails", async () => {
+    enrichFails = true;
+    const originalError = console.error;
+    const errors: unknown[][] = [];
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const result = await callAdd({ path: notePath, title: "My Title", tags: ["mine"], enrich: true });
+
+      expect(enrichCalls).toHaveLength(1);
+      expect(added).toHaveLength(1);
+      expect(added[0].options.title).toBe("My Title");
+      expect(added[0].options.tags).toEqual(["mine"]);
+      expect(result.success).toBe(true);
+      expect(errors.flat().join(" ")).toContain("LLM unavailable");
+    } finally {
+      console.error = originalError;
+    }
   });
 });
