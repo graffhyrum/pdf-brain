@@ -21,6 +21,7 @@ let enrichCalls: { path: string; content: string }[] = [];
 let enrichFails = false;
 let enrichDies = false;
 let llmTags = ["llm-tag"];
+let pdfPages: { text: string }[] | "fail" = "fail";
 
 beforeEach(() => {
   added = [];
@@ -54,8 +55,6 @@ const tagger = {
     } as unknown as EnrichmentResult);
   },
 } as unknown as AutoTagger;
-
-let pdfPages: { text: string }[] | "fail" = "fail";
 
 const pdfExtractor = {
   extract: () =>

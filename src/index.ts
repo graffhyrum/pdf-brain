@@ -584,7 +584,9 @@ export const PDFLibraryLive = (() => {
     const { loadConfig } = require("./types.js");
     const config = loadConfig();
     embeddingDim = getModelDimension(config.embedding.model);
-    console.log(
+    // stderr, not stdout: this runs at import time, before the MCP server can
+    // route console output away from its JSON-RPC stream on stdout.
+    console.error(
       `[PDFLibrary] Using embedding dimension ${embeddingDim} for model ${config.embedding.model}`,
     );
   } catch {

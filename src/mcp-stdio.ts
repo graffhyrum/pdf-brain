@@ -9,6 +9,8 @@ export function routeConsoleToStderr(): void {
   console.info = toStderr;
   console.debug = toStderr;
   // dir and table also write to stdout by default.
-  console.dir = (item: unknown, options?: unknown) => process.stderr.write(`${Bun.inspect(item, options as never)}\n`);
-  console.table = (data: unknown) => process.stderr.write(`${Bun.inspect.table(data as never)}`);
+  console.dir = (item: unknown, options?: Parameters<typeof Bun.inspect>[1]) =>
+    process.stderr.write(`${Bun.inspect(item, options)}\n`);
+  console.table = (data: Parameters<typeof Bun.inspect.table>[0]) =>
+    process.stderr.write(`${Bun.inspect.table(data)}\n`);
 }

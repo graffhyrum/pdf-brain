@@ -47,6 +47,8 @@ export const enrichAddMetadata = (
     });
     const enriched: EnrichedAddMetadata = {
       title: input.title || result.title,
+      // Exact-match dedupe: the library stores tags case-sensitively, so
+      // "Effect" and "effect" stay distinct here as they do everywhere else.
       tags: [...new Set([...input.tags, ...result.tags])],
       result,
     };
@@ -77,7 +79,8 @@ const readEnrichmentContent = (localPath: string) =>
     if (ext === ".md" || ext === ".markdown") {
       // tryPromise, not promise: a missing file must be a recoverable failure, not a defect.
       const readResult = yield* Effect.either(
-        Effect.tryPromise(() => Bun.file(localPath).text())
+        // Read only the head: 4 bytes per char covers ENRICH_CONTENT_MAX_CHARS of any UTF-8 text.
+        Effect.tryPromise(() => Bun.file(localPath).slice(0, ENRICH_CONTENT_MAX_CHARS * 4).text())
       );
       if (readResult._tag === "Left") {
         console.error(
