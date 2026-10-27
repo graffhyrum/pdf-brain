@@ -3,12 +3,14 @@
  * Kept out of cli.ts so tests can import them without running the CLI entry.
  */
 import { Cause, Effect } from "effect";
-import { extname } from "path";
+import { realpathSync } from "fs";
+import { extname, isAbsolute, relative, resolve, sep } from "path";
 import { AddOptions, PDFLibrary, SearchOptions } from "./index.js";
 import { AutoTagger, type EnrichmentResult } from "./services/AutoTagger.js";
 import { Ollama } from "./services/Ollama.js";
 import { PDFExtractor } from "./services/PDFExtractor.js";
 import { TaxonomyService, type Concept } from "./services/TaxonomyService.js";
+import { LibraryConfig } from "./types.js";
 
 /** Title and tags for `add`, merged with what LLM enrichment found. */
 interface EnrichedAddMetadata {
@@ -105,8 +107,26 @@ export type MCPToolServices =
   | AutoTagger
   | PDFExtractor;
 
+/** Whether the add enriched, could not, or tried and failed. Absent from the result when enrich was not requested. */
+export type EnrichmentStatus = "applied" | "skipped" | "failed";
+
+/** `enrich` on the MCP tool reads local files, so it is limited to the library directory. */
+export class EnrichOutsideLibraryError extends Error {
+  readonly _tag = "EnrichOutsideLibraryError";
+  constructor(libraryRoot: string, path: string) {
+    super(
+      `enrich is limited to files under the library (${libraryRoot}); ${path} is outside it. Retry without enrich, or move the file into the library.`
+    );
+  }
+}
+
+export interface MCPToolHandlerOptions {
+  /** Directory `enrich` may read from. Defaults to the configured library path, read when a call runs. */
+  readonly libraryRoot?: string;
+}
+
 /** Build the handler for each MCP tool, keyed by tool name. */
-export const createMCPToolHandlers = () => {
+export const createMCPToolHandlers = (options: MCPToolHandlerOptions = {}) => {
   const toolHandlers: Record<string, (args: any) => Effect.Effect<any, any, MCPToolServices>> = {
     "pdf-brain_add": (args) =>
       Effect.gen(function* () {
@@ -115,22 +135,19 @@ export const createMCPToolHandlers = () => {
           ? args.tags.filter((t: unknown): t is string => typeof t === "string")
           : undefined;
         const callerMetadata = { title: args.title, tags: callerTags ?? [] };
-        const metadata =
-          args.enrich === true
-            ? yield* enrichAddMetadata(args.path, callerMetadata).pipe(
-                // catchAllCause, not catchAll: AutoTagger.enrich uses Effect.promise
-                // internally, so a rejection there is a defect that catchAll would miss.
-                Effect.catchAllCause((cause) =>
-                  Effect.sync(() => {
-                    // Best effort: a failed LLM call must not stop the add.
-                    console.error(
-                      `[pdf-brain_add] Enrichment failed, adding with caller metadata: ${Cause.pretty(cause)}`
-                    );
-                    return callerMetadata;
-                  })
-                )
-              )
-            : callerMetadata;
+        const enrichRequested = args.enrich === true;
+        if (enrichRequested) {
+          // Outside the best-effort catch in enrichBestEffort: a rejection must fail the add
+          // before anything is read or stored. Only the MCP handler is limited this way; the
+          // CLI `add --enrich` is run by the user directly and stays unrestricted.
+          yield* requireInsideLibrary(
+            args.path,
+            options.libraryRoot ?? LibraryConfig.fromEnv().libraryPath
+          );
+        }
+        const { metadata, status } = enrichRequested
+          ? yield* enrichBestEffort(args.path, callerMetadata)
+          : { metadata: callerMetadata, status: undefined };
         const doc = yield* library.add(
           args.path,
           new AddOptions({
@@ -140,7 +157,11 @@ export const createMCPToolHandlers = () => {
             tags: metadata.tags.length > 0 ? metadata.tags : callerTags,
           })
         );
-        return { success: true, document: { id: doc.id, title: doc.title, tags: doc.tags } };
+        return {
+          success: true,
+          document: { id: doc.id, title: doc.title, tags: doc.tags },
+          ...(status ? { enrichment: status } : {}),
+        };
       }),
     "pdf-brain_search": (args) =>
       Effect.gen(function* () {
@@ -254,3 +275,65 @@ export const createMCPToolHandlers = () => {
   };
   return toolHandlers;
 };
+
+const isUrl = (path: string) => /^https?:\/\//i.test(path);
+
+/** Same leading-"~" rule as readEnrichmentContent, library.add and PDFExtractor.extract. */
+function expandHome(path: string): string {
+  return path.startsWith("~") ? path.replace("~", process.env.HOME || "") : path;
+}
+
+/** Real path of `path`, or null when it cannot be resolved (for example, it does not exist). */
+function tryRealpath(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+/** True when `target` is `root` or below it. relative(), not a string prefix, so "<root>-evil" fails. */
+function isInside(root: string, target: string): boolean {
+  const rel = relative(root, target);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/**
+ * Fail unless a local `path` resolves, through symlinks and "..", to a place inside `libraryRoot`.
+ * A path that does not exist passes: library.add reports it and enrichment is skipped.
+ */
+function requireInsideLibrary(path: string, libraryRoot: string) {
+  if (isUrl(path)) return Effect.void;
+  const real = tryRealpath(resolve(expandHome(path)));
+  if (real === null) return Effect.void;
+  const root = tryRealpath(libraryRoot) ?? resolve(libraryRoot);
+  return isInside(root, real)
+    ? Effect.void
+    : Effect.fail(new EnrichOutsideLibraryError(root, path));
+}
+
+/** Enrich when there is content to enrich; any failure falls back to the caller's metadata. */
+function enrichBestEffort(
+  path: string,
+  callerMetadata: { readonly title: string | undefined; readonly tags: string[] }
+) {
+  const skipped = { metadata: callerMetadata, status: "skipped" as EnrichmentStatus };
+  if (isUrl(path)) return Effect.succeed(skipped);
+  return enrichAddMetadata(path, callerMetadata).pipe(
+    Effect.map(
+      (metadata): { metadata: typeof callerMetadata; status: EnrichmentStatus } =>
+        metadata.result ? { metadata, status: "applied" } : skipped
+    ),
+    // catchAllCause, not catchAll: AutoTagger.enrich uses Effect.promise
+    // internally, so a rejection there is a defect that catchAll would miss.
+    Effect.catchAllCause((cause) =>
+      Effect.sync(() => {
+        // Best effort: a failed LLM call must not stop the add.
+        console.error(
+          `[pdf-brain_add] Enrichment failed, adding with caller metadata: ${Cause.pretty(cause)}`
+        );
+        return { metadata: callerMetadata, status: "failed" as EnrichmentStatus };
+      })
+    )
+  );
+}

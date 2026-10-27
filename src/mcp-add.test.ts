@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { Effect } from "effect";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createMCPToolHandlers, readEnrichmentContent } from "./mcp-tools.js";
@@ -10,11 +10,14 @@ import { Ollama } from "./services/Ollama.js";
 import { PDFExtractor } from "./services/PDFExtractor.js";
 import { TaxonomyService } from "./services/TaxonomyService.js";
 
-const dir = mkdtempSync(join(tmpdir(), "pdf-brain-mcp-add-"));
+// `dir` is the library root handed to the handlers; `base` also holds files outside it.
+const base = mkdtempSync(join(tmpdir(), "pdf-brain-mcp-add-"));
+const dir = join(base, "lib");
+mkdirSync(join(dir, "sub"), { recursive: true });
 const notePath = join(dir, "note.md");
 const noteContent = "# Effect notes\n\nLayers, services, and generators.";
 writeFileSync(notePath, noteContent);
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+afterAll(() => rmSync(base,{ recursive: true, force: true }));
 
 let added: { path: string; options: AddOptions }[] = [];
 let enrichCalls: { path: string; content: string }[] = [];
@@ -65,7 +68,7 @@ const pdfExtractor = {
 
 const callAdd = (args: Record<string, unknown>) =>
   Effect.runPromise(
-    createMCPToolHandlers()["pdf-brain_add"](args).pipe(
+    createMCPToolHandlers({ libraryRoot: dir })["pdf-brain_add"](args).pipe(
       Effect.provideService(PDFLibrary, library),
       Effect.provideService(AutoTagger, tagger),
       Effect.provideService(PDFExtractor, pdfExtractor),
@@ -83,6 +86,7 @@ describe("MCP pdf-brain_add", () => {
     expect(added[0].options.title).toBe("LLM Title");
     expect(added[0].options.tags).toEqual(["mine", "llm-tag"]);
     expect(result.document.title).toBe("LLM Title");
+    expect(result.enrichment).toBe("applied");
   });
 
   test("enrich: true keeps a title the caller passed", async () => {
@@ -114,6 +118,7 @@ describe("MCP pdf-brain_add", () => {
       expect(added[0].options.title).toBe("My Title");
       expect(added[0].options.tags).toEqual(["mine"]);
       expect(result.success).toBe(true);
+      expect(result.enrichment).toBe("failed");
       expect(errors.flat().join(" ")).toContain("LLM unavailable");
     } finally {
       console.error = originalError;
@@ -140,8 +145,9 @@ describe("MCP pdf-brain_add", () => {
     console.error = () => {};
     try {
       const missing = join(dir, "missing.md");
-      await callAdd({ path: missing, title: "My Title", enrich: true });
+      const result = await callAdd({ path: missing, title: "My Title", enrich: true });
 
+      expect(result.enrichment).toBe("skipped");
       expect(enrichCalls).toHaveLength(0);
       expect(added).toHaveLength(1);
       expect(added[0].path).toBe(missing);
@@ -188,8 +194,9 @@ describe("MCP pdf-brain_add", () => {
     const originalError = console.error;
     console.error = () => {};
     try {
-      await callAdd({ path: join(dir, "broken.pdf"), title: "My Title", enrich: true });
+      const result = await callAdd({ path: join(dir, "broken.pdf"), title: "My Title", enrich: true });
 
+      expect(result.enrichment).toBe("skipped");
       expect(enrichCalls).toHaveLength(0);
       expect(added).toHaveLength(1);
       expect(added[0].options.title).toBe("My Title");
@@ -218,6 +225,7 @@ describe("MCP pdf-brain_add", () => {
       expect(added[0].options.title).toBe("My Title");
       expect(added[0].options.tags).toEqual(["mine"]);
       expect(result.success).toBe(true);
+      expect(result.enrichment).toBe("failed");
       expect(errors.flat().join(" ")).toContain("provider client crashed");
     } finally {
       console.error = originalError;
@@ -245,6 +253,74 @@ describe("MCP pdf-brain_add", () => {
     expect(added[0].options.title).toBe("My Title");
     expect(added[0].options.tags).toEqual(["mine"]);
     expect(result.success).toBe(true);
+    expect(result.enrichment).toBe("skipped");
+  });
+
+  test("enrich: true on a URL skips enrichment and still adds", async () => {
+    const result = await callAdd({ path: "https://example.com/paper.pdf", enrich: true });
+
+    expect(result.enrichment).toBe("skipped");
+    expect(enrichCalls).toHaveLength(0);
+    expect(added).toHaveLength(1);
+  });
+
+  test("without enrich, the result has no enrichment field", async () => {
+    const result = await callAdd({ path: notePath });
+
+    expect("enrichment" in result).toBe(false);
+  });
+});
+
+describe("MCP pdf-brain_add enrich is limited to the library", () => {
+  const outsidePath = join(base, "outside.md");
+  const siblingDir = `${dir}-other`;
+  writeFileSync(outsidePath, "# Outside");
+  mkdirSync(siblingDir, { recursive: true });
+  writeFileSync(join(siblingDir, "x.md"), "# Sibling");
+  symlinkSync(outsidePath, join(dir, "escape-link.md"));
+  symlinkSync(notePath, join(dir, "inside-link.md"));
+
+  const expectRejected = async (path: string) => {
+    const failure = await callAdd({ path, enrich: true }).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).toContain(
+      `enrich is limited to files under the library (${realpathSync(dir)})`
+    );
+    expect(String(failure)).toContain("Retry without enrich");
+    expect(added).toHaveLength(0);
+    expect(enrichCalls).toHaveLength(0);
+  };
+
+  test("rejects a .. escape", async () => {
+    await expectRejected(join(dir, "sub", "..", "..", "outside.md"));
+  });
+
+  test("rejects a symlink inside the library that points outside", async () => {
+    await expectRejected(join(dir, "escape-link.md"));
+  });
+
+  test("rejects a sibling directory that shares the library path as a prefix", async () => {
+    await expectRejected(join(siblingDir, "x.md"));
+  });
+
+  test("accepts a file inside the library, including through a symlink that stays inside", async () => {
+    const direct = await callAdd({ path: notePath, enrich: true });
+    const linked = await callAdd({ path: join(dir, "inside-link.md"), enrich: true });
+
+    expect(direct.enrichment).toBe("applied");
+    expect(linked.enrichment).toBe("applied");
+    expect(added).toHaveLength(2);
+  });
+
+  test("does not restrict a call without enrich", async () => {
+    const result = await callAdd({ path: outsidePath });
+
+    expect("enrichment" in result).toBe(false);
+    expect(added).toHaveLength(1);
   });
 });
 

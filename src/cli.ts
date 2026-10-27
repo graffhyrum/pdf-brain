@@ -581,7 +581,9 @@ function runMCPServer(): void {
               "Enable LLM enrichment to suggest a title and tags. " +
               "Sends text from the start of the file (first 10 pages of a PDF, at most 8000 characters; " +
               "the prompt itself uses the first 6000) to the configured LLM provider (Ollama or Anthropic). " +
-              "Local files only; URLs are added without enrichment.",
+              "Local files only; URLs are added without enrichment. " +
+              "Only reads files under the library directory (PDF_LIBRARY_PATH); other paths are rejected and nothing is added. " +
+              "The result's `enrichment` field is \"applied\" | \"skipped\" | \"failed\", and is absent when enrich is not requested.",
             default: false,
           },
         },
