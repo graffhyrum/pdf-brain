@@ -25,7 +25,7 @@ import {
   AutoTaggerLive,
   type EnrichmentResult,
 } from "./services/AutoTagger.js";
-import { PDFExtractor, PDFExtractorLive } from "./services/PDFExtractor.js";
+import { PDFExtractorLive } from "./services/PDFExtractor.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(
@@ -53,6 +53,7 @@ import { routeConsoleToStderr } from "./mcp-stdio.js";
 import {
   createMCPToolHandlers,
   enrichAddMetadata,
+  readEnrichmentContent,
   type MCPToolServices,
 } from "./mcp-tools.js";
 
@@ -1876,7 +1877,6 @@ const program = Effect.gen(function* () {
 
               if (autoTag || enrich) {
                 const tagger = yield* AutoTagger;
-                const pdfExtractor = yield* PDFExtractor;
                 const ext = extname(filePath).toLowerCase();
                 let content: string | undefined;
 
@@ -1885,18 +1885,12 @@ const program = Effect.gen(function* () {
                   if (enrich) {
                     currentFile.status = "chunking";
                     tui.update({ currentFile });
-                    const extractResult = yield* Effect.either(
-                      pdfExtractor.extract(filePath)
-                    );
-                    if (extractResult._tag === "Right") {
-                      const pages = extractResult.right.pages.slice(0, 10);
-                      content = pages.map((p) => p.text).join("\n\n");
-                      if (content.length > 8000) {
-                        content = content.slice(0, 8000);
-                      }
-                    }
+                    content = yield* readEnrichmentContent(filePath);
                   }
-                } else if (ext === ".md" || ext === ".markdown") {
+                } else if (enrich) {
+                  content = yield* readEnrichmentContent(filePath);
+                } else {
+                  // Auto-tag only: keyword heuristics scan the whole file, so no enrichment cap
                   const readResult = yield* Effect.either(
                     Effect.tryPromise(() => Bun.file(filePath).text())
                   );
@@ -2038,7 +2032,6 @@ const program = Effect.gen(function* () {
             // For auto-tag or enrich, we need to read content first
             if (autoTag || enrich) {
               const tagger = yield* AutoTagger;
-              const pdfExtractor = yield* PDFExtractor;
 
               // Read file content for LLM analysis
               const ext = extname(filePath).toLowerCase();
@@ -2048,20 +2041,13 @@ const program = Effect.gen(function* () {
                 // Extract PDF text for enrichment
                 if (enrich) {
                   yield* Console.log(`    Extracting PDF text...`);
-                  const extractResult = yield* Effect.either(
-                    pdfExtractor.extract(filePath)
-                  );
-                  if (extractResult._tag === "Right") {
-                    // Use first 10 pages, max 8k chars
-                    const pages = extractResult.right.pages.slice(0, 10);
-                    content = pages.map((p) => p.text).join("\n\n");
-                    if (content.length > 8000) {
-                      content = content.slice(0, 8000);
-                    }
-                  }
+                  content = yield* readEnrichmentContent(filePath);
                 }
+              } else if (enrich) {
+                // Markdown: the same capped head read as MCP add
+                content = yield* readEnrichmentContent(filePath);
               } else {
-                // For markdown, read directly
+                // Auto-tag only: keyword heuristics scan the whole file, so no enrichment cap
                 const readResult = yield* Effect.either(
                   Effect.tryPromise(() => Bun.file(filePath).text())
                 );

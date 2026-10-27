@@ -59,7 +59,7 @@ export const enrichAddMetadata = (
 const ENRICH_CONTENT_MAX_CHARS = 8000;
 
 /** Text to enrich from: the first 10 pages of a PDF or the start of a Markdown file, capped at ENRICH_CONTENT_MAX_CHARS. */
-const readEnrichmentContent = (localPath: string) =>
+export const readEnrichmentContent = (localPath: string) =>
   Effect.gen(function* () {
     const ext = extname(localPath).toLowerCase();
     if (ext === ".pdf") {
