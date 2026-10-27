@@ -25,7 +25,7 @@ import {
   AutoTaggerLive,
   type EnrichmentResult,
 } from "./services/AutoTagger.js";
-import { PDFExtractor, PDFExtractorLive } from "./services/PDFExtractor.js";
+import { PDFExtractorLive } from "./services/PDFExtractor.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(
@@ -49,6 +49,13 @@ import {
   type Concept,
 } from "./services/TaxonomyService.js";
 import { Ollama, OllamaLive } from "./services/Ollama.js";
+import { routeConsoleToStderr } from "./mcp-stdio.js";
+import {
+  createMCPToolHandlers,
+  enrichAddMetadata,
+  readEnrichmentContent,
+  type MCPToolServices,
+} from "./mcp-tools.js";
 
 /**
  * Check if a string is a URL
@@ -546,6 +553,7 @@ export function parseArgs(args: string[]) {
  * Refactored to keep Effect layer scope alive for process lifetime
  */
 function runMCPServer(): void {
+  routeConsoleToStderr();
   const config = LibraryConfig.fromEnv();
   const TaxonomyServiceLive = TaxonomyServiceImpl.make({
     url: `file:${config.dbPath}`,
@@ -567,7 +575,17 @@ function runMCPServer(): void {
           path: { type: "string", description: "File path or URL" },
           title: { type: "string", description: "Optional custom title" },
           tags: { type: "array", items: { type: "string" }, description: "Optional tags" },
-          enrich: { type: "boolean", description: "Enable LLM enrichment", default: false },
+          enrich: {
+            type: "boolean",
+            description:
+              "Enable LLM enrichment to suggest a title and tags. " +
+              "Sends text from the start of the file (first 10 pages of a PDF, at most 8000 characters; " +
+              "the prompt itself uses the first 6000) to the configured LLM provider (Ollama or Anthropic). " +
+              "Local files only; URLs are added without enrichment. " +
+              "Only reads files under the library directory (PDF_LIBRARY_PATH); other paths are rejected and nothing is added. " +
+              "The result's `enrichment` field is \"applied\" | \"skipped\" | \"failed\", and is absent when enrich is not requested.",
+            default: false,
+          },
         },
         required: ["path"],
       },
@@ -669,136 +687,9 @@ function runMCPServer(): void {
     },
   ];
 
-  // Tool handlers - refactored to use Effect environment
-  const createToolHandlers = () => {
-    const toolHandlers: Record<string, (args: any) => Effect.Effect<any, any, PDFLibrary | Ollama | TaxonomyService>> = {
-      "pdf-brain_add": (args) =>
-        Effect.gen(function* () {
-          const library = yield* PDFLibrary;
-          const doc = yield* library.add(
-            args.path,
-            new AddOptions({
-              title: args.title,
-              tags: args.tags,
-            })
-          );
-          return { success: true, document: { id: doc.id, title: doc.title, tags: doc.tags } };
-        }),
-      "pdf-brain_search": (args) =>
-        Effect.gen(function* () {
-          const library = yield* PDFLibrary;
-          const ollama = yield* Ollama;
-          const taxonomy = yield* TaxonomyService;
-
-          const conceptsOnly = args.conceptsOnly === true;
-          const docsOnly = args.docsOnly === true;
-
-          // Determine what to search (matching CLI logic at lines 1086-1087)
-          // If both flags are true, both search flags are false (search neither)
-          const searchDocs = !conceptsOnly;
-          const searchConcepts = !docsOnly;
-
-          // Handle conflicting flags: if both are true, search neither (empty results)
-          if (!searchDocs && !searchConcepts) {
-            return { 
-              success: true, 
-              type: "empty", 
-              documents: [],
-              concepts: []
-            };
-          }
-
-          // Search concepts (if enabled)
-          const conceptResults = searchConcepts
-            ? yield* Effect.gen(function* () {
-                const queryEmbedding = yield* ollama.embed(args.query);
-                return yield* taxonomy.findSimilarConcepts(queryEmbedding, 0.3, args.limit || 10);
-              }).pipe(Effect.catchAll(() => Effect.succeed([] as Concept[])))
-            : [];
-
-          // Search documents (if enabled)
-          const docResults = searchDocs
-            ? yield* library.search(args.query, new SearchOptions({ limit: args.limit || 10 }))
-            : [];
-
-          // Return appropriate response format based on what was searched
-          if (searchConcepts && !searchDocs) {
-            return { success: true, type: "concepts", results: conceptResults };
-          } else if (searchDocs && !searchConcepts) {
-            return { success: true, type: "documents", results: docResults };
-          } else {
-            // Both searched (default case)
-            return { 
-              success: true, 
-              type: "unified", 
-              documents: docResults,
-              concepts: conceptResults
-            };
-          }
-        }),
-      "pdf-brain_list": (args) =>
-        Effect.gen(function* () {
-          const library = yield* PDFLibrary;
-          const docs = yield* library.list(args.tag);
-          return { success: true, documents: docs.map(d => ({ id: d.id, title: d.title, tags: d.tags })) };
-        }),
-      "pdf-brain_read": (args) =>
-        Effect.gen(function* () {
-          const library = yield* PDFLibrary;
-          const doc = yield* library.get(args.id);
-          if (!doc) {
-            return yield* Effect.fail(new Error("Document not found"));
-          }
-          return { success: true, document: { id: doc.id, title: doc.title, path: doc.path, tags: doc.tags, pageCount: doc.pageCount, sizeBytes: doc.sizeBytes, addedAt: doc.addedAt } };
-        }),
-      "pdf-brain_remove": (args) =>
-        Effect.gen(function* () {
-          const library = yield* PDFLibrary;
-          const doc = yield* library.remove(args.id);
-          return { success: true, removed: { id: doc.id, title: doc.title } };
-        }),
-      "pdf-brain_tag": (args) =>
-        Effect.gen(function* () {
-          const library = yield* PDFLibrary;
-          const doc = yield* library.tag(args.id, args.tags);
-          return { success: true, document: { id: doc.id, title: doc.title, tags: doc.tags } };
-        }),
-      "pdf-brain_stats": (args) =>
-        Effect.gen(function* () {
-          const library = yield* PDFLibrary;
-          const stats = yield* library.stats();
-          return { success: true, stats };
-        }),
-      "pdf-brain_taxonomy_list": (args) =>
-        Effect.gen(function* () {
-          const taxonomy = yield* TaxonomyService;
-          const concepts = yield* taxonomy.listConcepts();
-          return { success: true, concepts: concepts.map(c => ({ id: c.id, prefLabel: c.prefLabel, definition: c.definition })) };
-        }),
-      "pdf-brain_taxonomy_search": (args) =>
-        Effect.gen(function* () {
-          const taxonomy = yield* TaxonomyService;
-          const concepts = yield* taxonomy.listConcepts();
-          const queryLower = args.query.toLowerCase();
-          const results = concepts.filter(c =>
-            c.prefLabel.toLowerCase().includes(queryLower) ||
-            c.altLabels.some(alt => alt.toLowerCase().includes(queryLower)) ||
-            (c.definition && c.definition.toLowerCase().includes(queryLower))
-          );
-          return { success: true, concepts: results.map(c => ({ id: c.id, prefLabel: c.prefLabel, definition: c.definition })) };
-        }),
-      "pdf-brain_check": (args) =>
-        Effect.gen(function* () {
-          const library = yield* PDFLibrary;
-          yield* library.checkReady();
-          return { success: true, message: "Ollama is ready" };
-        }),
-    };
-    return toolHandlers;
-  };
 
   // Handle STDIO messages - refactored to use Effect environment
-  const handleMessage = (message: any): Effect.Effect<any, any, PDFLibrary | Ollama | TaxonomyService> => {
+  const handleMessage = (message: any): Effect.Effect<any, any, MCPToolServices> => {
     if (message.method === "initialize") {
       return Effect.succeed({
         jsonrpc: "2.0",
@@ -824,7 +715,7 @@ function runMCPServer(): void {
       });
     } else if (message.method === "tools/call") {
       const { name, arguments: args } = message.params;
-      const toolHandlers = createToolHandlers();
+      const toolHandlers = createMCPToolHandlers();
       const handler = toolHandlers[name];
       if (handler) {
         return Effect.gen(function* () {
@@ -1063,37 +954,15 @@ const program = Effect.gen(function* () {
       if (enrich) {
         const providerLabel = forceProvider || "auto";
         yield* Console.log(`  Enriching with LLM (${providerLabel})...`);
-        const tagger = yield* AutoTagger;
-        const pdfExtractor = yield* PDFExtractor;
-        const ext = extname(localPath).toLowerCase();
-        let content: string | undefined;
-
-        if (ext === ".pdf") {
-          const extractResult = yield* Effect.either(
-            pdfExtractor.extract(localPath)
-          );
-          if (extractResult._tag === "Right") {
-            const pages = extractResult.right.pages.slice(0, 10);
-            content = pages.map((p) => p.text).join("\n\n");
-            if (content.length > 8000) {
-              content = content.slice(0, 8000);
-            }
-          }
-        } else if (ext === ".md" || ext === ".markdown") {
-          const readResult = yield* Effect.either(
-            Effect.promise(() => Bun.file(localPath).text())
-          );
-          if (readResult._tag === "Right") {
-            content = readResult.right;
-          }
-        }
-
-        if (content) {
-          const enrichResult = yield* tagger.enrich(localPath, content, {
-            provider: forceProvider,
-          });
-          enrichedTitle = enrichedTitle || enrichResult.title;
-          enrichedTags = [...enrichedTags, ...enrichResult.tags];
+        const enriched = yield* enrichAddMetadata(localPath, {
+          title: enrichedTitle,
+          tags: enrichedTags,
+          provider: forceProvider,
+        });
+        enrichedTitle = enriched.title;
+        enrichedTags = enriched.tags;
+        const enrichResult = enriched.result;
+        if (enrichResult) {
           yield* Console.log(`  Title: ${enrichResult.title}`);
           yield* Console.log(`  Summary: ${enrichResult.summary}`);
           // Proposed concepts are now auto-accepted in AutoTagger
@@ -2011,7 +1880,6 @@ const program = Effect.gen(function* () {
 
               if (autoTag || enrich) {
                 const tagger = yield* AutoTagger;
-                const pdfExtractor = yield* PDFExtractor;
                 const ext = extname(filePath).toLowerCase();
                 let content: string | undefined;
 
@@ -2020,23 +1888,19 @@ const program = Effect.gen(function* () {
                   if (enrich) {
                     currentFile.status = "chunking";
                     tui.update({ currentFile });
-                    const extractResult = yield* Effect.either(
-                      pdfExtractor.extract(filePath)
-                    );
-                    if (extractResult._tag === "Right") {
-                      const pages = extractResult.right.pages.slice(0, 10);
-                      content = pages.map((p) => p.text).join("\n\n");
-                      if (content.length > 8000) {
-                        content = content.slice(0, 8000);
-                      }
-                    }
+                    content = yield* readEnrichmentContent(filePath);
                   }
                 } else if (ext === ".md" || ext === ".markdown") {
-                  const readResult = yield* Effect.either(
-                    Effect.promise(() => Bun.file(filePath).text())
-                  );
-                  if (readResult._tag === "Right") {
-                    content = readResult.right;
+                  if (enrich) {
+                    content = yield* readEnrichmentContent(filePath);
+                  } else {
+                    // Auto-tag only: keyword heuristics scan the whole file, so no enrichment cap
+                    const readResult = yield* Effect.either(
+                      Effect.tryPromise(() => Bun.file(filePath).text())
+                    );
+                    if (readResult._tag === "Right") {
+                      content = readResult.right;
+                    }
                   }
                 }
 
@@ -2173,7 +2037,6 @@ const program = Effect.gen(function* () {
             // For auto-tag or enrich, we need to read content first
             if (autoTag || enrich) {
               const tagger = yield* AutoTagger;
-              const pdfExtractor = yield* PDFExtractor;
 
               // Read file content for LLM analysis
               const ext = extname(filePath).toLowerCase();
@@ -2183,22 +2046,15 @@ const program = Effect.gen(function* () {
                 // Extract PDF text for enrichment
                 if (enrich) {
                   yield* Console.log(`    Extracting PDF text...`);
-                  const extractResult = yield* Effect.either(
-                    pdfExtractor.extract(filePath)
-                  );
-                  if (extractResult._tag === "Right") {
-                    // Use first 10 pages, max 8k chars
-                    const pages = extractResult.right.pages.slice(0, 10);
-                    content = pages.map((p) => p.text).join("\n\n");
-                    if (content.length > 8000) {
-                      content = content.slice(0, 8000);
-                    }
-                  }
+                  content = yield* readEnrichmentContent(filePath);
                 }
+              } else if (enrich) {
+                // Markdown: the same capped head read as MCP add
+                content = yield* readEnrichmentContent(filePath);
               } else {
-                // For markdown, read directly
+                // Auto-tag only: keyword heuristics scan the whole file, so no enrichment cap
                 const readResult = yield* Effect.either(
-                  Effect.promise(() => Bun.file(filePath).text())
+                  Effect.tryPromise(() => Bun.file(filePath).text())
                 );
                 if (readResult._tag === "Right") {
                   content = readResult.right;

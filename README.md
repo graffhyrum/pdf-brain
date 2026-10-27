@@ -467,6 +467,12 @@ pdf-brain ships as an MCP server for AI coding assistants:
 | `pdf-brain_tag`       | Set tags on a document                        |
 | `pdf-brain_stats`     | Library statistics (docs, chunks, embeddings) |
 
+`pdf-brain_add` with `enrich: true` only reads files under the library directory
+(`PDF_LIBRARY_PATH`, default `~/Documents/.pdf-library`). A file outside it, including
+through a symlink or `..`, is rejected and nothing is added. The result then carries
+`enrichment`: `"applied"`, `"skipped"` (no content to enrich) or `"failed"` (the add
+still succeeds with your metadata). The field is absent when `enrich` is not requested.
+
 ### Taxonomy Tools
 
 | Tool                        | Description                              |
