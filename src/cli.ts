@@ -580,7 +580,8 @@ function runMCPServer(): void {
             description:
               "Enable LLM enrichment to suggest a title and tags. " +
               "Sends text from the start of the file (first 10 pages of a PDF, at most 8000 characters; " +
-              "the prompt itself uses the first 6000) to the configured LLM provider (Ollama or Anthropic).",
+              "the prompt itself uses the first 6000) to the configured LLM provider (Ollama or Anthropic). " +
+              "Local files only; URLs are added without enrichment.",
             default: false,
           },
         },
@@ -1887,15 +1888,17 @@ const program = Effect.gen(function* () {
                     tui.update({ currentFile });
                     content = yield* readEnrichmentContent(filePath);
                   }
-                } else if (enrich) {
-                  content = yield* readEnrichmentContent(filePath);
-                } else {
-                  // Auto-tag only: keyword heuristics scan the whole file, so no enrichment cap
-                  const readResult = yield* Effect.either(
-                    Effect.tryPromise(() => Bun.file(filePath).text())
-                  );
-                  if (readResult._tag === "Right") {
-                    content = readResult.right;
+                } else if (ext === ".md" || ext === ".markdown") {
+                  if (enrich) {
+                    content = yield* readEnrichmentContent(filePath);
+                  } else {
+                    // Auto-tag only: keyword heuristics scan the whole file, so no enrichment cap
+                    const readResult = yield* Effect.either(
+                      Effect.tryPromise(() => Bun.file(filePath).text())
+                    );
+                    if (readResult._tag === "Right") {
+                      content = readResult.right;
+                    }
                   }
                 }
 

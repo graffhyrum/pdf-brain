@@ -144,6 +144,12 @@ describe("MCP pdf-brain_add", () => {
     expect(added[1].options.tags).toBeUndefined();
   });
 
+  test("enrich: true ignores a non-array tags value instead of splitting it into characters", async () => {
+    await callAdd({ path: notePath, tags: "foo", enrich: true });
+
+    expect(added[0].options.tags).toEqual(["llm-tag"]);
+  });
+
   test("enrich: true on a PDF sends only the first 10 pages", async () => {
     pdfPages = Array.from({ length: 12 }, (_, i) => ({ text: `page ${i}` }));
     const pdfPath = join(dir, "paper.pdf");

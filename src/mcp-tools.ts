@@ -107,7 +107,10 @@ export const createMCPToolHandlers = () => {
     "pdf-brain_add": (args) =>
       Effect.gen(function* () {
         const library = yield* PDFLibrary;
-        const callerMetadata = { title: args.title, tags: args.tags ?? [] };
+        const callerTags: string[] | undefined = Array.isArray(args.tags)
+          ? args.tags.filter((t: unknown): t is string => typeof t === "string")
+          : undefined;
+        const callerMetadata = { title: args.title, tags: callerTags ?? [] };
         const metadata =
           args.enrich === true
             ? yield* enrichAddMetadata(args.path, callerMetadata).pipe(
@@ -128,9 +131,9 @@ export const createMCPToolHandlers = () => {
           args.path,
           new AddOptions({
             title: metadata.title,
-            // No tags at all: pass args.tags through as-is, so a caller who sent no
+            // No tags at all: pass callerTags through as-is, so a caller who sent no
             // tags leaves AddOptions.tags undefined (and one who sent [] keeps []).
-            tags: metadata.tags.length > 0 ? metadata.tags : args.tags,
+            tags: metadata.tags.length > 0 ? metadata.tags : callerTags,
           })
         );
         return { success: true, document: { id: doc.id, title: doc.title, tags: doc.tags } };
