@@ -43,8 +43,10 @@ test("the running MCP server sends console.log to stderr, keeping stdout pure JS
     const decoder = new TextDecoder();
     for await (const chunk of stream) onText(decoder.decode(chunk));
   };
-  pump(proc.stdout, (t) => (stdout += t));
-  pump(proc.stderr, (t) => (stderr += t));
+  const pumps = [
+    pump(proc.stdout, (t) => (stdout += t)),
+    pump(proc.stderr, (t) => (stderr += t)),
+  ];
   const waitFor = async (check: () => boolean, what: string) => {
     for (let i = 0; i < 500 && !check(); i++) await Bun.sleep(10);
     if (!check()) throw new Error(`timed out waiting for ${what}`);
@@ -63,6 +65,7 @@ test("the running MCP server sends console.log to stderr, keeping stdout pure JS
   } finally {
     proc.kill();
     await proc.exited;
+    await Promise.all(pumps);
     rmSync(libraryPath, { recursive: true, force: true });
   }
 });

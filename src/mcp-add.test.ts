@@ -3,7 +3,7 @@ import { Effect } from "effect";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { createMCPToolHandlers } from "./mcp-tools.js";
+import { createMCPToolHandlers, readEnrichmentContent } from "./mcp-tools.js";
 import { AddOptions, PDFLibrary } from "./index.js";
 import { AutoTagger, type EnrichmentResult } from "./services/AutoTagger.js";
 import { Ollama } from "./services/Ollama.js";
@@ -176,6 +176,7 @@ describe("MCP pdf-brain_add", () => {
       console.error = originalError;
     }
   });
+
   test("enrich: true does not store a tag twice when the LLM repeats a caller tag", async () => {
     llmTags = ["mine", "llm-tag"];
 
@@ -209,5 +210,32 @@ describe("MCP pdf-brain_add", () => {
     await callAdd({ path: longPath, enrich: true });
 
     expect(enrichCalls[0].content).toHaveLength(8000);
+  });
+
+  test("enrich: true on an unsupported extension (.txt) skips enrichment and still adds", async () => {
+    const txtPath = join(dir, "note.txt");
+    writeFileSync(txtPath, "plain text");
+
+    const result = await callAdd({ path: txtPath, title: "My Title", tags: ["mine"], enrich: true });
+
+    expect(enrichCalls).toHaveLength(0);
+    expect(added).toHaveLength(1);
+    expect(added[0].path).toBe(txtPath);
+    expect(added[0].options.title).toBe("My Title");
+    expect(added[0].options.tags).toEqual(["mine"]);
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("readEnrichmentContent (shared by MCP add and CLI batch add)", () => {
+  test("caps Markdown at 8000 characters", async () => {
+    const longPath = join(dir, "batch-long.md");
+    writeFileSync(longPath, "z".repeat(20000));
+
+    const content = await Effect.runPromise(
+      readEnrichmentContent(longPath).pipe(Effect.provideService(PDFExtractor, pdfExtractor))
+    );
+
+    expect(content).toHaveLength(8000);
   });
 });
