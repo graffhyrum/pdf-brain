@@ -120,6 +120,21 @@ describe("MCP pdf-brain_add", () => {
     }
   });
 
+  test("enrich: true expands a leading ~ in a Markdown path", async () => {
+    const originalHome = process.env.HOME;
+    process.env.HOME = dir;
+    try {
+      await callAdd({ path: "~/note.md", enrich: true });
+
+      expect(enrichCalls).toHaveLength(1);
+      expect(enrichCalls[0].content).toBe(noteContent);
+      expect(added[0].options.title).toBe("LLM Title");
+      expect(added[0].options.tags).toEqual(["llm-tag"]);
+    } finally {
+      process.env.HOME = originalHome;
+    }
+  });
+
   test("enrich: true on a missing Markdown file skips enrichment and still adds", async () => {
     const originalError = console.error;
     console.error = () => {};

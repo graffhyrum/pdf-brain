@@ -61,11 +61,15 @@ const ENRICH_CONTENT_MAX_CHARS = 8000;
 /** Text to enrich from: the first 10 pages of a PDF or the start of a Markdown file, capped at ENRICH_CONTENT_MAX_CHARS. */
 export const readEnrichmentContent = (localPath: string) =>
   Effect.gen(function* () {
-    const ext = extname(localPath).toLowerCase();
+    // Same "~" rule as library.add and PDFExtractor.extract, so every branch reads the file add will store.
+    const resolvedPath = localPath.startsWith("~")
+      ? localPath.replace("~", process.env.HOME || "")
+      : localPath;
+    const ext = extname(resolvedPath).toLowerCase();
     if (ext === ".pdf") {
       const pdfExtractor = yield* PDFExtractor;
       const extractResult = yield* Effect.either(
-        pdfExtractor.extract(localPath)
+        pdfExtractor.extract(resolvedPath)
       );
       if (extractResult._tag === "Left") {
         console.error(
@@ -80,11 +84,11 @@ export const readEnrichmentContent = (localPath: string) =>
       // tryPromise, not promise: a missing file must be a recoverable failure, not a defect.
       const readResult = yield* Effect.either(
         // Read only the head: 4 bytes per char covers ENRICH_CONTENT_MAX_CHARS of any UTF-8 text.
-        Effect.tryPromise(() => Bun.file(localPath).slice(0, ENRICH_CONTENT_MAX_CHARS * 4).text())
+        Effect.tryPromise(() => Bun.file(resolvedPath).slice(0, ENRICH_CONTENT_MAX_CHARS * 4).text())
       );
       if (readResult._tag === "Left") {
         console.error(
-          `[enrich] Skipping enrichment, could not read ${localPath}: ${readResult.left}`
+          `[enrich] Skipping enrichment, could not read ${resolvedPath}: ${readResult.left}`
         );
         return undefined;
       }
